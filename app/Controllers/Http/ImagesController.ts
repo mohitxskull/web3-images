@@ -5,102 +5,107 @@ import { cuid } from '@ioc:Adonis/Core/Helpers'
 import Drive from '@ioc:Adonis/Core/Drive'
 import { Web3StorageClient } from 'App/Client/web3storage'
 import { File } from 'web3.storage'
-import { GetQuerySchema, ImageMetaSchema, UploadQuerySchema } from 'App/Validators/zod'
+import { GetQuerySchema, ImageMetaSchema } from 'App/Validators/zod'
 import { MongoDBClient } from 'App/Client/mongodb'
 import sharp from 'sharp'
 import fetch from 'node-fetch'
 import { ImageURL } from 'App/Helper/builder'
+import Logger from '@ioc:Adonis/Core/Logger'
+import TokenValidator from 'App/Validators/TokenValidator'
 
 export default class ImagesController {
+  private logger = Logger.child({
+    controller: 'ImagesController',
+  })
+
+  private async fileUpload(fileName: string, imageType?: string) {
+    const logger = this.logger.child({
+      method: 'fileUpload',
+    })
+
+    const imageFileRaw = await Drive.get(fileName)
+
+    const imageFile = new File([imageFileRaw], 'image', {
+      type: imageType,
+    })
+
+    const cid = await Web3StorageClient.put([imageFile])
+
+    logger.info({ cid }, 'cid of image')
+
+    Drive.delete(fileName)
+
+    const metaRaw = await sharp(imageFileRaw).metadata()
+
+    const meta = ImageMetaSchema.safeParse(metaRaw)
+
+    if (!meta.success) {
+      logger.error(
+        {
+          metaErr: meta.error,
+          metaRaw,
+        },
+        'Error while getting image metadata'
+      )
+
+      Web3StorageClient.delete(cid)
+
+      Drive.delete(fileName)
+
+      return null
+    }
+
+    const imgCuid = cuid()
+
+    logger.info(
+      {
+        imageCuid: imgCuid,
+      },
+      'Image CUID'
+    )
+
+    MongoDBClient.addImg({
+      cuid: imgCuid,
+      cid: cid,
+      height: meta.data.height,
+      width: meta.data.width,
+      format: meta.data.format,
+      quality: 100,
+      lastUsed: new Date(),
+    })
+
+    return imgCuid
+  }
+
   public async upload({ request, response }: HttpContextContract) {
-    const queryRaw = request.qs()
-
-    const query = UploadQuerySchema.safeParse(queryRaw)
-
-    console.info('ImagesController.upload -> query', query)
-
-    if (!query.success) {
-      console.error('ImagesController.upload -> query parsing error', query.error)
-
-      return response.badRequest({
-        status: 400,
-        message: 'Invalid query params',
-      })
-    }
-
-    const keyValid = await MongoDBClient.checkKey(query.data.key)
-
-    console.info('ImagesController.upload -> keyValid', keyValid)
-
-    if (!keyValid) {
-      console.error('ImagesController.upload -> invalid key', query.data.key)
-
-      return response.badRequest({
-        status: 400,
-        message: 'Invalid key',
-      })
-    }
+    const logger = this.logger.child({
+      method: 'upload',
+    })
 
     const payload = await request.validate(UploadValidator)
 
     try {
       const fileName = `${cuid()}.${payload.image.extname}`
 
-      console.info('ImagesController.upload -> fileName', fileName)
+      logger.info(
+        {
+          fileName,
+        },
+        'Image File name'
+      )
 
       await payload.image.move(Application.tmpPath('uploads'), {
         name: fileName,
       })
 
-      const imageFileRaw = await Drive.get(fileName)
+      const imgCuid = await this.fileUpload(fileName, payload.image.type)
 
-      const imageFile = new File([imageFileRaw], 'image', {
-        type: payload.image.type,
-      })
-
-      const cid = await Web3StorageClient.put([imageFile])
-
-      console.info('ImagesController.upload -> cid', cid)
-
-      Drive.delete(fileName)
-
-      const metaRaw = await sharp(imageFileRaw).metadata()
-
-      const meta = ImageMetaSchema.safeParse(metaRaw)
-
-      if (!meta.success) {
-        console.error(
-          'ImagesController.upload -> meta parsing error',
-          meta.error,
-          'metadata',
-          metaRaw
-        )
-
-        Web3StorageClient.delete(cid)
-
-        Drive.delete(fileName)
-
+      if (!imgCuid) {
         return response.badRequest({
-          status: 400,
-          message: 'Invalid image',
+          staus: 400,
+          message: 'Invalid Image',
         })
       }
-
-      const imgCuid = cuid()
-
-      console.info('ImagesController.upload -> imgCuid', imgCuid)
-
-      await MongoDBClient.addImg({
-        cuid: imgCuid,
-        cid: cid,
-        height: meta.data.height,
-        width: meta.data.width,
-        format: meta.data.format,
-        quality: 100,
-        lastUsed: new Date(),
-      })
-
-      console.info('ImagesController.upload -> image added to db')
 
       return response.ok({
         status: 200,
@@ -110,8 +115,83 @@ export default class ImagesController {
         },
       })
     } catch (error) {
-      console.error('ImagesController.upload -> error')
-      console.error(error)
+      logger.error(
+        {
+          err: error,
+        },
+        'Error while uploading image'
+      )
+
+      return response.internalServerError({
+        status: 500,
+        message: 'Internal server error',
+      })
+    }
+  }
+
+  public async tokenUpload({ request, response }: HttpContextContract) {
+    const logger = this.logger.child({
+      method: 'tokenUpload',
+    })
+
+    const payload = await request.validate(TokenValidator)
+
+    try {
+      const canUseToken = await MongoDBClient.canUseToken(payload.token)
+
+      logger.info(
+        {
+          canUseToken,
+          token: payload.token,
+        },
+        'Token Validation'
+      )
+
+      if (!canUseToken) {
+        return response.badRequest({
+          status: 400,
+          message: 'Invalid token',
+        })
+      }
+
+      const fileName = `${cuid()}.${payload.image.extname}`
+
+      logger.info(
+        {
+          fileName,
+        },
+        'Image File name'
+      )
+
+      await payload.image.move(Application.tmpPath('uploads'), {
+        name: fileName,
+      })
+
+      const imgCuid = await this.fileUpload(fileName, payload.image.type)
+
+      if (!imgCuid) {
+        return response.badRequest({
+          staus: 400,
+          message: 'Invalid Image',
+        })
+      }
+
+      MongoDBClient.useToken(payload.token)
+
+      return response.ok({
+        status: 200,
+        message: 'Image uploaded successfully',
+        data: {
+          cuid: imgCuid,
+        },
+      })
+    } catch (error) {
+      logger.error(
+        {
+          err: error,
+        },
+        'Error while uploading image (token)'
+      )
 
       return response.internalServerError({
         status: 500,
@@ -121,15 +201,29 @@ export default class ImagesController {
   }
 
   public async get({ request, response }: HttpContextContract) {
+    const logger = this.logger.child({
+      method: 'get',
+    })
+
     try {
       const queryRaw = request.qs()
 
       const query = GetQuerySchema.safeParse(queryRaw)
 
-      console.info('ImagesController.get -> query', query)
+      logger.info(
+        {
+          body: query,
+        },
+        'Get image request params'
+      )
 
       if (!query.success) {
-        console.error('ImagesController.get -> query parsing error', query.error)
+        logger.error(
+          {
+            zodErr: query.error,
+          },
+          'Query Parsing Error'
+        )
 
         return response.badRequest({
           status: 400,
@@ -139,7 +233,12 @@ export default class ImagesController {
 
       const image = await MongoDBClient.getImg(query.data)
 
-      console.info('ImagesController.get -> image', image)
+      logger.info(
+        {
+          image,
+        },
+        'Image Object'
+      )
 
       if (image) {
         response.header('Cache-Control', 'public, max-age=3600')
@@ -155,7 +254,12 @@ export default class ImagesController {
 
       const originalImage = await MongoDBClient.getOrgImg(query.data.cuid)
 
-      console.info('ImagesController.get -> originalImage', originalImage)
+      logger.info(
+        {
+          image: originalImage,
+        },
+        'Original Image Object'
+      )
 
       if (!originalImage) {
         return response.notFound({
@@ -166,7 +270,12 @@ export default class ImagesController {
 
       const oldImageRes = await fetch(ImageURL(originalImage.cid))
 
-      console.info('ImagesController.get -> oldImageRes', oldImageRes)
+      logger.info(
+        {
+          fetchRes: oldImageRes,
+        },
+        'Old Image Download Response'
+      )
 
       const oldImageBuffer = await oldImageRes.buffer()
 
@@ -186,7 +295,12 @@ export default class ImagesController {
 
       const newImageCid = await Web3StorageClient.put([newImageFile])
 
-      console.info('ImagesController.get -> newImageCid', newImageCid)
+      logger.info(
+        {
+          cid: newImageCid,
+        },
+        'New Generated Image CID'
+      )
 
       MongoDBClient.addImg({
         cuid: query.data.cuid,
@@ -208,8 +322,12 @@ export default class ImagesController {
         },
       })
     } catch (error) {
-      console.error('ImagesController.get -> error')
-      console.error(error)
+      logger.error(
+        {
+          err: error,
+        },
+        'Error while getting image'
+      )
 
       return response.internalServerError({
         status: 500,

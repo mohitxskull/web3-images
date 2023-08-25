@@ -4,11 +4,17 @@ Route.get('/', async ({ response }) =>
   response.ok({
     status: 200,
     message: 'WEB3 IMAGE API',
+    creator: 'SKULL',
   })
 )
 
 Route.group(() => {
-  Route.post('/upload', 'ImagesController.upload')
+  Route.post('/upload', 'ImagesController.upload').middleware('auth')
+
+  Route.post('/upload/token', 'ImagesController.tokenUpload')
+
+  Route.get('/token', 'TokensController.create').middleware('auth')
+
   Route.get('/get', 'ImagesController.get')
 }).prefix('/api')
 

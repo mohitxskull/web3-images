@@ -2,6 +2,8 @@ import { z } from 'zod'
 
 const ValidFormatSchema = z.enum(['jpg', 'png', 'jpeg', 'webp', 'avif'])
 
+const TokenUseSchema = z.number().min(1).max(50)
+
 // ==================================================================
 
 export const KeyColSchema = z.object({
@@ -21,6 +23,14 @@ export const ImageColSchema = z.object({
 })
 
 export type ImageColType = z.infer<typeof ImageColSchema>
+
+export const TokenColSchema = z.object({
+  token: z.string(),
+  useLeft: TokenUseSchema,
+  expAt: z.date(),
+})
+
+export type TokenColType = z.infer<typeof TokenColSchema>
 
 // ==================================================================
 
@@ -45,6 +55,17 @@ export const GetQuerySchema = z.object({
     .transform((val) => Number(val)),
 
   format: ValidFormatSchema,
+})
+
+export const TokenCreateQuerySchema = z.object({
+  use: z
+    .string()
+    .refine((val) => {
+      const num = Number(val)
+
+      return !isNaN(num) && num > 0 && num < 50
+    }, 'Must be a number')
+    .transform((val) => Number(val)),
 })
 
 // ==================================================================
